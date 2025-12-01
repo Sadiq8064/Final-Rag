@@ -1,9 +1,0 @@
-{
-  "name": "gemini-rag-worker",
-  "version": "1.0.0",
-  "description": "Cloudflare Worker Backend for Gemini File Search RAG",
-  "type": "module",
-  "dependencies": {
-    "@google/genai": "latest"
-  }
-}
