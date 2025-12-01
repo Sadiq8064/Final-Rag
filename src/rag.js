@@ -30,6 +30,56 @@ export default {
         .substring(0, 180);
     };
 
+    // Detect MIME type based on extension
+    function detectMimeType(filename, fallback = "application/octet-stream") {
+      if (!filename) return fallback;
+
+      const ext = filename.split(".").pop().toLowerCase();
+
+      const MIME_MAP = {
+        // Documents
+        "pdf": "application/pdf",
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "json": "application/json",
+        "csv": "text/csv",
+        "tsv": "text/tab-separated-values",
+        "xml": "application/xml",
+        "yaml": "text/yaml",
+        "yml": "text/yaml",
+
+        // Word / Excel / PowerPoint
+        "doc": "application/msword",
+        "docx":
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls": "application/vnd.ms-excel",
+        "xlsx":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt": "application/vnd.ms-powerpoint",
+        "pptx":
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+
+        // Images
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "svg": "image/svg+xml",
+
+        // Code
+        "js": "text/javascript",
+        "ts": "application/typescript",
+        "html": "text/html",
+        "css": "text/css",
+
+        // Archives
+        "zip": "application/zip"
+      };
+
+      return MIME_MAP[ext] || fallback;
+    }
+
     // ---------------------
     // ROUTES START
     // ---------------------
@@ -104,13 +154,19 @@ export default {
         const cleanedName = cleanFilename(file.name);
         const arrayBuffer = await file.arrayBuffer();
 
+        const mimeType = detectMimeType(cleanedName);
+
         let operation;
         let docId = null;
         let docResource = null;
 
         try {
           operation = await ai.fileSearchStores.uploadToFileSearchStore({
-            file: { buffer: arrayBuffer, displayName: cleanedName },
+            file: {
+              buffer: arrayBuffer,
+              displayName: cleanedName,
+              mimeType
+            },
             fileSearchStoreName: fsStoreName,
             config: { displayName: cleanedName }
           });
