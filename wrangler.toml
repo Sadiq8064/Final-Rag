@@ -6,6 +6,6 @@ compatibility_flags = ["nodejs_compat"]
 # KV storage for store metadata
 [[kv_namespaces]]
 binding = "RAG"
-id = "YOUR_KV_ID_HERE"
+id = "e4bbd1bcec7c4b9f84bed8b644958ac2"
 
 
