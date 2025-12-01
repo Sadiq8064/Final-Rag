@@ -1,0 +1,299 @@
+import { GoogleGenAI } from "@google/genai";
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    // route parsing helper
+    const method = request.method.toUpperCase();
+
+    // initialize Gemini client
+    const initAI = (apiKey) => new GoogleGenAI({ apiKey });
+
+    // Load KV JSON
+    async function load() {
+      const raw = await env.RAG.get("stores");
+      return raw ? JSON.parse(raw) : { file_stores: {}, current_store_name: null };
+    }
+
+    async function save(data) {
+      await env.RAG.put("stores", JSON.stringify(data));
+    }
+
+    // sanitize filename
+    const cleanFilename = (name) => {
+      return name
+        .trim()
+        .replace(/\s+/g, "_")
+        .replace(/[^A-Za-z0-9_\-\.]/g, "_")
+        .substring(0, 180);
+    };
+
+    // ---------------------
+    // ROUTES START
+    // ---------------------
+
+    // ============= CREATE STORE =============
+    if (pathname === "/stores/create" && method === "POST") {
+      const body = await request.json();
+
+      const apiKey = body.api_key;
+      const storeName = body.store_name;
+
+      if (!apiKey || !storeName) {
+        return json({ error: "Missing api_key or store_name" }, 400);
+      }
+
+      const ai = initAI(apiKey);
+      const data = await load();
+
+      if (data.file_stores[storeName]) {
+        return json({ error: "Store already exists" }, 400);
+      }
+
+      try {
+        const fsStore = await ai.fileSearchStores.create({
+          config: { displayName: storeName }
+        });
+
+        data.file_stores[storeName] = {
+          store_name: storeName,
+          file_search_store_name: fsStore.name,
+          created_at: new Date().toISOString(),
+          files: []
+        };
+        data.current_store_name = storeName;
+
+        await save(data);
+
+        return json({
+          success: true,
+          store_name: storeName,
+          file_search_store_resource: fsStore.name,
+          created_at: data.file_stores[storeName].created_at,
+          file_count: 0
+        });
+      } catch (e) {
+        return json({ error: e.toString() }, 500);
+      }
+    }
+
+    // ============= UPLOAD FILE =============
+    if (pathname.startsWith("/stores/") && pathname.endsWith("/upload") && method === "POST") {
+      const segments = pathname.split("/");
+      const storeName = segments[2];
+
+      const data = await load();
+      const store = data.file_stores[storeName];
+
+      if (!store) return json({ error: "Store not found" }, 404);
+
+      const form = await request.formData();
+      const apiKey = form.get("api_key");
+      const files = form.getAll("files");
+
+      if (!apiKey) return json({ error: "Missing api_key" }, 400);
+
+      const ai = initAI(apiKey);
+      const fsStoreName = store.file_search_store_name;
+
+      const results = [];
+
+      for (const file of files) {
+        const cleanedName = cleanFilename(file.name);
+        const arrayBuffer = await file.arrayBuffer();
+
+        let operation;
+        let docId = null;
+        let docResource = null;
+
+        try {
+          operation = await ai.fileSearchStores.uploadToFileSearchStore({
+            file: { buffer: arrayBuffer, displayName: cleanedName },
+            fileSearchStoreName: fsStoreName,
+            config: { displayName: cleanedName }
+          });
+
+          // Poll operation
+          while (!operation.done) {
+            await new Promise((r) => setTimeout(r, 2000));
+            operation = await ai.operations.get({ operation });
+          }
+
+          // extract doc resource
+          docResource = operation?.response?.fileSearchDocument?.name || null;
+          if (docResource) docId = docResource.split("/").pop();
+        } catch (err) {
+          results.push({
+            filename: cleanedName,
+            uploaded: false,
+            indexed: false,
+            gemini_error: err.toString()
+          });
+          continue;
+        }
+
+        // Record metadata in KV
+        store.files.push({
+          display_name: cleanedName,
+          size_bytes: arrayBuffer.byteLength,
+          uploaded_at: new Date().toISOString(),
+          gemini_indexed: true,
+          document_resource: docResource,
+          document_id: docId,
+          gemini_error: null
+        });
+
+        await save(data);
+
+        results.push({
+          filename: cleanedName,
+          uploaded: true,
+          indexed: true,
+          document_resource: docResource,
+          document_id: docId,
+          gemini_error: null
+        });
+      }
+
+      return json({ success: true, results });
+    }
+
+    // ============= LIST STORES =============
+    if (pathname === "/stores" && method === "GET") {
+      const apiKey = url.searchParams.get("api_key");
+      if (!apiKey) return json({ error: "Missing api_key" }, 400);
+
+      try {
+        initAI(apiKey); // verify
+      } catch (e) {
+        return json({ error: e.toString() }, 400);
+      }
+
+      const data = await load();
+      return json({ success: true, stores: Object.values(data.file_stores) });
+    }
+
+    // ============= DELETE DOCUMENT =============
+    if (pathname.startsWith("/stores/") && pathname.includes("/documents/") && method === "DELETE") {
+      const segments = pathname.split("/");
+      const storeName = segments[2];
+      const documentId = segments[4];
+      const apiKey = url.searchParams.get("api_key");
+
+      if (!apiKey) return json({ error: "Missing api_key" }, 400);
+
+      const data = await load();
+      const store = data.file_stores[storeName];
+      if (!store) return json({ error: "Store not found" }, 404);
+
+      const fsStore = store.file_search_store_name;
+
+      const deleteURL =
+        `https://generativelanguage.googleapis.com/v1beta/${fsStore}/documents/${documentId}?force=true&key=${apiKey}`;
+
+      const resp = await fetch(deleteURL, { method: "DELETE" });
+
+      if (resp.status !== 200 && resp.status !== 204) {
+        return json({ success: false, error: await resp.text() }, resp.status);
+      }
+
+      // remove from KV
+      store.files = store.files.filter((f) => f.document_id !== documentId);
+      await save(data);
+
+      return json({ success: true, deleted_document_id: documentId });
+    }
+
+    // ============= DELETE ENTIRE STORE =============
+    if (pathname.startsWith("/stores/") && method === "DELETE") {
+      const segments = pathname.split("/");
+      const storeName = segments[2];
+      const apiKey = url.searchParams.get("api_key");
+
+      const data = await load();
+      const store = data.file_stores[storeName];
+
+      if (!store) return json({ error: "Store not found" }, 404);
+
+      try {
+        const ai = initAI(apiKey);
+        await ai.fileSearchStores.delete({
+          name: store.file_search_store_name,
+          config: { force: true }
+        });
+      } catch (e) {
+        // ignore errors
+      }
+
+      delete data.file_stores[storeName];
+      if (data.current_store_name === storeName) data.current_store_name = null;
+
+      await save(data);
+
+      return json({ success: true, deleted_store: storeName });
+    }
+
+    // ============= ASK (RAG) =============
+    if (pathname === "/ask" && method === "POST") {
+      const body = await request.json();
+      const apiKey = body.api_key;
+      const stores = body.stores;
+      const question = body.question;
+      const systemPrompt = body.system_prompt;
+
+      const ai = initAI(apiKey);
+
+      const data = await load();
+      const fsStores = [];
+
+      for (const s of stores) {
+        if (data.file_stores[s]) {
+          fsStores.push(data.file_stores[s].file_search_store_name);
+        }
+      }
+
+      if (fsStores.length === 0) {
+        return json({ error: "No valid stores found" }, 400);
+      }
+
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: question,
+          config: {
+            systemInstruction:
+              systemPrompt ||
+              "Answer ONLY based on provided File Search store documents.",
+            tools: [
+              {
+                fileSearch: {
+                  fileSearchStoreNames: fsStores
+                }
+              }
+            ]
+          }
+        });
+
+        return json({
+          success: true,
+          response_text: response.text,
+          grounding_metadata: response.candidates?.[0]?.groundingMetadata || null
+        });
+      } catch (e) {
+        return json({ error: e.toString() }, 500);
+      }
+    }
+
+    return json({ error: "Route not found" }, 404);
+  }
+};
+
+// JSON helper
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json" }
+  });
+}
