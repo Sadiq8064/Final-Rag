@@ -4,103 +4,80 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const pathname = url.pathname;
-
-    // route parsing helper
     const method = request.method.toUpperCase();
 
-    // initialize Gemini client
+    // Init Gemini client
     const initAI = (apiKey) => new GoogleGenAI({ apiKey });
 
-    // Load KV JSON
+    // Load + save KV
     async function load() {
       const raw = await env.RAG.get("stores");
       return raw ? JSON.parse(raw) : { file_stores: {}, current_store_name: null };
     }
-
     async function save(data) {
       await env.RAG.put("stores", JSON.stringify(data));
     }
 
-    // sanitize filename
-    const cleanFilename = (name) => {
-      return name
-        .trim()
-        .replace(/\s+/g, "_")
-        .replace(/[^A-Za-z0-9_\-\.]/g, "_")
-        .substring(0, 180);
-    };
+    // Clean filenames
+    const cleanFilename = (name) =>
+      name.trim().replace(/\s+/g, "_").replace(/[^A-Za-z0-9_\-\.]/g, "_").substring(0, 180);
 
-    // Detect MIME type based on extension
+    // Mime detection based on extension
     function detectMimeType(filename, fallback = "application/octet-stream") {
       if (!filename) return fallback;
-
       const ext = filename.split(".").pop().toLowerCase();
 
       const MIME_MAP = {
-        // Documents
-        "pdf": "application/pdf",
-        "txt": "text/plain",
-        "md": "text/markdown",
-        "json": "application/json",
-        "csv": "text/csv",
-        "tsv": "text/tab-separated-values",
-        "xml": "application/xml",
-        "yaml": "text/yaml",
-        "yml": "text/yaml",
+        pdf: "application/pdf",
+        txt: "text/plain",
+        md: "text/markdown",
+        json: "application/json",
+        csv: "text/csv",
+        tsv: "text/tab-separated-values",
+        xml: "application/xml",
+        yaml: "text/yaml",
+        yml: "text/yaml",
 
-        // Word / Excel / PowerPoint
-        "doc": "application/msword",
-        "docx":
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xls": "application/vnd.ms-excel",
-        "xlsx":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "ppt": "application/vnd.ms-powerpoint",
-        "pptx":
-          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        doc: "application/msword",
+        docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        xls: "application/vnd.ms-excel",
+        xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ppt: "application/vnd.ms-powerpoint",
+        pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 
-        // Images
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-        "gif": "image/gif",
-        "webp": "image/webp",
-        "svg": "image/svg+xml",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        gif: "image/gif",
+        webp: "image/webp",
+        svg: "image/svg+xml",
 
-        // Code
-        "js": "text/javascript",
-        "ts": "application/typescript",
-        "html": "text/html",
-        "css": "text/css",
+        js: "text/javascript",
+        ts: "application/typescript",
+        html: "text/html",
+        css: "text/css",
 
-        // Archives
-        "zip": "application/zip"
+        zip: "application/zip"
       };
 
       return MIME_MAP[ext] || fallback;
     }
 
-    // ---------------------
-    // ROUTES START
-    // ---------------------
-
-    // ============= CREATE STORE =============
+    // ======================================================
+    // CREATE STORE
+    // ======================================================
     if (pathname === "/stores/create" && method === "POST") {
       const body = await request.json();
-
       const apiKey = body.api_key;
       const storeName = body.store_name;
 
-      if (!apiKey || !storeName) {
-        return json({ error: "Missing api_key or store_name" }, 400);
-      }
+      if (!apiKey || !storeName) return json({ error: "Missing api_key or store_name" }, 400);
 
       const ai = initAI(apiKey);
       const data = await load();
 
-      if (data.file_stores[storeName]) {
+      if (data.file_stores[storeName])
         return json({ error: "Store already exists" }, 400);
-      }
 
       try {
         const fsStore = await ai.fileSearchStores.create({
@@ -113,8 +90,8 @@ export default {
           created_at: new Date().toISOString(),
           files: []
         };
-        data.current_store_name = storeName;
 
+        data.current_store_name = storeName;
         await save(data);
 
         return json({
@@ -129,20 +106,20 @@ export default {
       }
     }
 
-    // ============= UPLOAD FILE =============
+    // ======================================================
+    // UPLOAD FILE
+    // ======================================================
     if (pathname.startsWith("/stores/") && pathname.endsWith("/upload") && method === "POST") {
       const segments = pathname.split("/");
       const storeName = segments[2];
 
       const data = await load();
       const store = data.file_stores[storeName];
-
       if (!store) return json({ error: "Store not found" }, 404);
 
       const form = await request.formData();
       const apiKey = form.get("api_key");
       const files = form.getAll("files");
-
       if (!apiKey) return json({ error: "Missing api_key" }, 400);
 
       const ai = initAI(apiKey);
@@ -152,34 +129,37 @@ export default {
 
       for (const file of files) {
         const cleanedName = cleanFilename(file.name);
+        const mimeType = detectMimeType(cleanedName);
         const arrayBuffer = await file.arrayBuffer();
 
-        const mimeType = detectMimeType(cleanedName);
+        console.log("UPLOAD:", cleanedName, "MIME:", mimeType);
 
         let operation;
-        let docId = null;
         let docResource = null;
+        let docId = null;
 
         try {
           operation = await ai.fileSearchStores.uploadToFileSearchStore({
             file: {
               buffer: arrayBuffer,
-              displayName: cleanedName,
-              mimeType
+              displayName: cleanedName
             },
             fileSearchStoreName: fsStoreName,
-            config: { displayName: cleanedName }
+            config: {
+              displayName: cleanedName,
+              mimeType: mimeType      // << THE CRITICAL FIX
+            }
           });
 
-          // Poll operation
+          // poll LRO
           while (!operation.done) {
-            await new Promise((r) => setTimeout(r, 2000));
+            await new Promise((res) => setTimeout(res, 2000));
             operation = await ai.operations.get({ operation });
           }
 
-          // extract doc resource
           docResource = operation?.response?.fileSearchDocument?.name || null;
           if (docResource) docId = docResource.split("/").pop();
+
         } catch (err) {
           results.push({
             filename: cleanedName,
@@ -190,7 +170,7 @@ export default {
           continue;
         }
 
-        // Record metadata in KV
+        // Save metadata
         store.files.push({
           display_name: cleanedName,
           size_bytes: arrayBuffer.byteLength,
@@ -216,13 +196,15 @@ export default {
       return json({ success: true, results });
     }
 
-    // ============= LIST STORES =============
+    // ======================================================
+    // LIST STORES
+    // ======================================================
     if (pathname === "/stores" && method === "GET") {
       const apiKey = url.searchParams.get("api_key");
       if (!apiKey) return json({ error: "Missing api_key" }, 400);
 
       try {
-        initAI(apiKey); // verify
+        initAI(apiKey);
       } catch (e) {
         return json({ error: e.toString() }, 400);
       }
@@ -231,7 +213,9 @@ export default {
       return json({ success: true, stores: Object.values(data.file_stores) });
     }
 
-    // ============= DELETE DOCUMENT =============
+    // ======================================================
+    // DELETE DOCUMENT
+    // ======================================================
     if (pathname.startsWith("/stores/") && pathname.includes("/documents/") && method === "DELETE") {
       const segments = pathname.split("/");
       const storeName = segments[2];
@@ -239,7 +223,6 @@ export default {
       const apiKey = url.searchParams.get("api_key");
 
       if (!apiKey) return json({ error: "Missing api_key" }, 400);
-
       const data = await load();
       const store = data.file_stores[storeName];
       if (!store) return json({ error: "Store not found" }, 404);
@@ -251,18 +234,19 @@ export default {
 
       const resp = await fetch(deleteURL, { method: "DELETE" });
 
-      if (resp.status !== 200 && resp.status !== 204) {
+      if (![200, 204].includes(resp.status)) {
         return json({ success: false, error: await resp.text() }, resp.status);
       }
 
-      // remove from KV
       store.files = store.files.filter((f) => f.document_id !== documentId);
       await save(data);
 
       return json({ success: true, deleted_document_id: documentId });
     }
 
-    // ============= DELETE ENTIRE STORE =============
+    // ======================================================
+    // DELETE STORE
+    // ======================================================
     if (pathname.startsWith("/stores/") && method === "DELETE") {
       const segments = pathname.split("/");
       const storeName = segments[2];
@@ -279,9 +263,7 @@ export default {
           name: store.file_search_store_name,
           config: { force: true }
         });
-      } catch (e) {
-        // ignore errors
-      }
+      } catch (_) {}
 
       delete data.file_stores[storeName];
       if (data.current_store_name === storeName) data.current_store_name = null;
@@ -291,7 +273,9 @@ export default {
       return json({ success: true, deleted_store: storeName });
     }
 
-    // ============= ASK (RAG) =============
+    // ======================================================
+    // ASK (RAG)
+    // ======================================================
     if (pathname === "/ask" && method === "POST") {
       const body = await request.json();
       const apiKey = body.api_key;
@@ -300,7 +284,6 @@ export default {
       const systemPrompt = body.system_prompt;
 
       const ai = initAI(apiKey);
-
       const data = await load();
       const fsStores = [];
 
@@ -310,9 +293,8 @@ export default {
         }
       }
 
-      if (fsStores.length === 0) {
+      if (fsStores.length === 0)
         return json({ error: "No valid stores found" }, 400);
-      }
 
       try {
         const response = await ai.models.generateContent({
@@ -346,7 +328,7 @@ export default {
   }
 };
 
-// JSON helper
+// json helper
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
